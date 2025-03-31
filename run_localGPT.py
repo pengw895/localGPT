@@ -8,6 +8,10 @@ from langchain.embeddings import HuggingFaceInstructEmbeddings
 from langchain.llms import HuggingFacePipeline
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler  # for streaming response
 from langchain.callbacks.manager import CallbackManager
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from langchain.prompts import PromptTemplate
 
 callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
 
@@ -38,6 +42,149 @@ from constants import (
     CHROMA_SETTINGS,    
 )
 
+def load_template_document(template_path):
+    """
+    Load and parse a Word document template.
+    
+    Args:
+        template_path (str): Path to the template document
+        
+    Returns:
+        Document: The loaded Word document
+    """
+    if not os.path.exists(template_path):
+        logging.warning(f"Template document not found at {template_path}")
+        return None
+    return Document(template_path)
+
+def analyze_template_structure(template_doc):
+    """
+    Analyze the structure of the template document to help the LLM understand where to place content.
+    
+    Args:
+        template_doc (Document): The template Word document
+        
+    Returns:
+        str: A description of the template structure
+    """
+    structure = []
+    for i, para in enumerate(template_doc.paragraphs):
+        if para.text.strip():  # Only include non-empty paragraphs
+            structure.append(f"Paragraph {i+1}: {para.text[:100]}...")  # First 100 chars of each para
+    return "\n".join(structure)
+
+def get_llm_for_template(llm):
+    """
+    Create a specialized LLM chain for template filling.
+    
+    Args:
+        llm: The base LLM to use
+        
+    Returns:
+        RetrievalQA: A specialized chain for template filling
+    """
+    template_prompt = PromptTemplate(
+        input_variables=["template_structure", "rag_content"],
+        template="""
+        You are an expert at analyzing document templates and determining the best way to fill them with content.
+        
+        Here is the structure of the template document:
+        {template_structure}
+        
+        Here is the content to be placed in the template:
+        {rag_content}
+        
+        Analyze the template structure and the content, then provide instructions for where and how to place the content.
+        For each paragraph in the template, specify if it should:
+        1. Be kept as is
+        2. Be modified with the new content
+        3. Have the new content inserted after it
+        
+        Format your response as a JSON array of instructions, where each instruction has:
+        - paragraph_index: The index of the paragraph (1-based)
+        - action: "keep", "modify", or "insert_after"
+        - content: The content to use (if action is "modify" or "insert_after")
+        
+        Example:
+        [
+            {{"paragraph_index": 1, "action": "keep"}},
+            {{"paragraph_index": 2, "action": "modify", "content": "Modified content here"}},
+            {{"paragraph_index": 3, "action": "insert_after", "content": "New content to insert"}}
+        ]
+        """
+    )
+    
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        chain_type_kwargs={"prompt": template_prompt},
+        return_source_documents=False
+    )
+
+def fill_template_with_rag(template_doc, rag_content, llm):
+    """
+    Fill a template document with content from RAG using LLM for intelligent placement.
+    
+    Args:
+        template_doc (Document): The template Word document
+        rag_content (str): Content from RAG to fill the template
+        llm: The LLM to use for content placement
+        
+    Returns:
+        Document: The filled template document
+    """
+    if template_doc is None:
+        return None
+        
+    # Create a copy of the template
+    filled_doc = Document()
+    
+    # Analyze template structure
+    template_structure = analyze_template_structure(template_doc)
+    
+    # Get LLM instructions for content placement
+    template_llm = get_llm_for_template(llm)
+    instructions = template_llm({"template_structure": template_structure, "rag_content": rag_content})
+    
+    try:
+        import json
+        placement_instructions = json.loads(instructions["result"])
+    except json.JSONDecodeError:
+        logging.error("Failed to parse LLM instructions for template filling")
+        return None
+    
+    # Create a mapping of paragraph indices to their content
+    para_map = {}
+    for instruction in placement_instructions:
+        idx = instruction["paragraph_index"] - 1  # Convert to 0-based index
+        if instruction["action"] == "keep":
+            para_map[idx] = template_doc.paragraphs[idx].text
+        elif instruction["action"] == "modify":
+            para_map[idx] = instruction["content"]
+        elif instruction["action"] == "insert_after":
+            para_map[idx] = template_doc.paragraphs[idx].text
+            para_map[idx + 0.5] = instruction["content"]  # Use 0.5 to insert between paragraphs
+    
+    # Create the filled document
+    for idx in sorted(para_map.keys()):
+        new_para = filled_doc.add_paragraph()
+        new_para.text = para_map[idx]
+        
+        # Copy formatting from original paragraph if it exists
+        if isinstance(idx, int) and idx < len(template_doc.paragraphs):
+            orig_para = template_doc.paragraphs[idx]
+            new_para.style = orig_para.style
+            new_para.paragraph_format.alignment = orig_para.paragraph_format.alignment
+            
+            # Copy run formatting
+            for run in orig_para.runs:
+                new_run = new_para.add_run(run.text)
+                new_run.font.name = run.font.name
+                new_run.font.size = run.font.size
+                new_run.font.bold = run.font.bold
+                new_run.font.italic = run.font.italic
+    
+    return filled_doc
 
 def load_model(device_type, model_id, model_basename=None, LOGGING=logging):
     """
@@ -182,6 +329,103 @@ def retrieval_qa_pipline(device_type, use_history, promptTemplate_type="llama"):
 
     return qa
 
+def get_template_filling_prompt(template_structure, rag_content):
+    """
+    Create a prompt for the LLM to fill the template with RAG content.
+    
+    Args:
+        template_structure (str): Structure of the template document
+        rag_content (str): Content from RAG to fill the template
+        
+    Returns:
+        str: The prompt for template filling
+    """
+    return f"""
+    You are an expert at analyzing document templates and determining the best way to fill them with content.
+    
+    Here is the structure of the template document:
+    {template_structure}
+    
+    Here is the content to be placed in the template:
+    {rag_content}
+    
+    Analyze the template structure and the content, then provide instructions for where and how to place the content.
+    For each paragraph in the template, specify if it should:
+    1. Be kept as is
+    2. Be modified with the new content
+    3. Have the new content inserted after it
+    
+    Format your response as a JSON array of instructions, where each instruction has:
+    - paragraph_index: The index of the paragraph (1-based)
+    - action: "keep", "modify", or "insert_after"
+    - content: The content to use (if action is "modify" or "insert_after")
+    
+    Example:
+    [
+        {{"paragraph_index": 1, "action": "keep"}},
+        {{"paragraph_index": 2, "action": "modify", "content": "Modified content here"}},
+        {{"paragraph_index": 3, "action": "insert_after", "content": "New content to insert"}}
+    ]
+    """
+
+def get_template_improvement_prompt(template_structure, rag_content, current_content, user_feedback):
+    """
+    Create a prompt for the LLM to improve the template based on user feedback.
+    
+    Args:
+        template_structure (str): Structure of the template document
+        rag_content (str): Content from RAG to fill the template
+        current_content (str): Current content of the filled template
+        user_feedback (str): User's feedback on the current content
+        
+    Returns:
+        str: The prompt for template improvement
+    """
+    return f"""
+    You are an expert at improving document content based on user feedback.
+    
+    Here is the structure of the template document:
+    {template_structure}
+    
+    Here is the original content to be placed in the template:
+    {rag_content}
+    
+    Here is the current content of the filled template:
+    {current_content}
+    
+    Here is the user's feedback:
+    {user_feedback}
+    
+    Based on the user's feedback, provide instructions for improving the template content.
+    For each paragraph in the template, specify if it should:
+    1. Be kept as is
+    2. Be modified with improved content
+    3. Have additional content inserted after it
+    
+    Format your response as a JSON array of instructions, where each instruction has:
+    - paragraph_index: The index of the paragraph (1-based)
+    - action: "keep", "modify", or "insert_after"
+    - content: The content to use (if action is "modify" or "insert_after")
+    
+    Example:
+    [
+        {{"paragraph_index": 1, "action": "keep"}},
+        {{"paragraph_index": 2, "action": "modify", "content": "Improved content here"}},
+        {{"paragraph_index": 3, "action": "insert_after", "content": "Additional content to insert"}}
+    ]
+    """
+
+def get_current_template_content(filled_doc):
+    """
+    Get the current content of the filled template.
+    
+    Args:
+        filled_doc (Document): The filled template document
+        
+    Returns:
+        str: The current content of the template
+    """
+    return "\n".join(para.text for para in filled_doc.paragraphs)
 
 # chose device typ to run on as well as to show source documents.
 @click.command()
@@ -238,7 +482,17 @@ def retrieval_qa_pipline(device_type, use_history, promptTemplate_type="llama"):
     is_flag=True,
     help="whether to save Q&A pairs to a CSV file (Default is False)",
 )
-def main(device_type, show_sources, use_history, model_type, save_qa):
+@click.option(
+    "--template_path",
+    default="template.docx",
+    help="Path to the template document to fill with RAG content (Default is template.docx)",
+)
+@click.option(
+    "--save_filled_template",
+    is_flag=True,
+    help="Save filled template after each query (Default is False)",
+)
+def main(device_type, show_sources, use_history, model_type, save_qa, template_path, save_filled_template):
     """
     Implements the main information retrieval task for a localGPT.
 
@@ -250,29 +504,37 @@ def main(device_type, show_sources, use_history, model_type, save_qa):
     - device_type (str): Specifies the type of device where the model will run, e.g., 'cpu', 'mps', 'cuda', etc.
     - show_sources (bool): Flag to determine whether to display the source documents used for answering.
     - use_history (bool): Flag to determine whether to use chat history or not.
-
-    Notes:
-    - Logging information includes the device type, whether source documents are displayed, and the use of history.
-    - If the models directory does not exist, it creates a new one to store models.
-    - The user can exit the interactive loop by entering "exit".
-    - The source documents are displayed if the show_sources flag is set to True.
-
+    - template_path (str): Path to the template document to fill with RAG content.
+    - save_filled_template (bool): Whether to save filled template after each query.
     """
 
     logging.info(f"Running on: {device_type}")
     logging.info(f"Display Source Documents set to: {show_sources}")
     logging.info(f"Use history set to: {use_history}")
+    logging.info(f"Template document path: {template_path}")
+    logging.info(f"Save filled template set to: {save_filled_template}")
 
     # check if models directory do not exist, create a new one and store models here.
     if not os.path.exists(MODELS_PATH):
         os.mkdir(MODELS_PATH)
 
+    # Load template document if specified
+    template_doc = load_template_document(template_path)
+    if template_doc is None and save_filled_template:
+        logging.warning("Template document not found. Disabling template saving.")
+        save_filled_template = False
+
     qa = retrieval_qa_pipline(device_type, use_history, promptTemplate_type=model_type)
+    
+    # Get the LLM instance for template filling
+    llm = load_model(device_type, model_id=MODEL_ID, model_basename=MODEL_BASENAME, LOGGING=logging)
+
     # Interactive questions and answers
     while True:
         query = input("\nEnter a query: ")
         if query == "exit":
             break
+            
         # Get the answer from the chain
         res = qa(query)
         answer, docs = res["result"], res["source_documents"]
@@ -294,6 +556,62 @@ def main(device_type, show_sources, use_history, model_type, save_qa):
         # Log the Q&A to CSV only if save_qa is True
         if save_qa:
             utils.log_to_csv(query, answer)
+
+        # Save filled template if enabled
+        if save_filled_template and template_doc is not None:
+            # First attempt: Fill template with RAG content
+            template_structure = analyze_template_structure(template_doc)
+            template_prompt = get_template_filling_prompt(template_structure, answer)
+            template_llm = get_llm_for_template(llm)
+            instructions = template_llm({"template_structure": template_structure, "rag_content": answer})
+            
+            try:
+                import json
+                placement_instructions = json.loads(instructions["result"])
+                filled_doc = fill_template_with_rag(template_doc, answer, llm)
+                
+                if filled_doc is not None:
+                    # Save the initial filled template
+                    output_path = f"filled_template_{len(os.listdir('.')) + 1}.docx"
+                    filled_doc.save(output_path)
+                    logging.info(f"Saved initial filled template to {output_path}")
+                    
+                    # Show the filled template to the user
+                    print("\n> Initial filled template:")
+                    print(get_current_template_content(filled_doc))
+                    
+                    # Ask for user feedback
+                    feedback = input("\nWould you like to provide feedback to improve the template? (y/n): ")
+                    if feedback.lower() == 'y':
+                        user_feedback = input("Please provide your feedback: ")
+                        
+                        # Get improvement instructions from LLM
+                        improvement_prompt = get_template_improvement_prompt(
+                            template_structure, 
+                            answer, 
+                            get_current_template_content(filled_doc),
+                            user_feedback
+                        )
+                        improvement_instructions = template_llm({
+                            "template_structure": template_structure,
+                            "rag_content": improvement_prompt
+                        })
+                        
+                        try:
+                            improvement_placement = json.loads(improvement_instructions["result"])
+                            improved_doc = fill_template_with_rag(template_doc, user_feedback, llm)
+                            
+                            if improved_doc is not None:
+                                improved_path = f"improved_template_{len(os.listdir('.')) + 1}.docx"
+                                improved_doc.save(improved_path)
+                                logging.info(f"Saved improved template to {improved_path}")
+                                
+                                print("\n> Improved template:")
+                                print(get_current_template_content(improved_doc))
+                        except json.JSONDecodeError:
+                            logging.error("Failed to parse LLM instructions for template improvement")
+            except json.JSONDecodeError:
+                logging.error("Failed to parse LLM instructions for template filling")
 
 
 if __name__ == "__main__":

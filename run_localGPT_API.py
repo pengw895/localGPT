@@ -26,7 +26,7 @@ request_lock = Lock()
 
 
 if torch.backends.mps.is_available():
-    print "mps available"
+    print("mps available")
     DEVICE_TYPE = "mps"
 elif torch.cuda.is_available():
     DEVICE_TYPE = "cuda"
