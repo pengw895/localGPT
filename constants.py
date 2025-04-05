@@ -101,8 +101,8 @@ EMBEDDING_MODEL_NAME = "hkunlp/instructor-large"  # Uses 1.5 GB of VRAM (High Ac
 # MODEL_ID = "TheBloke/Llama-2-13b-Chat-GGUF"
 # MODEL_BASENAME = "llama-2-13b-chat.Q4_K_M.gguf"
 
-# MODEL_ID = "TheBloke/Llama-2-7b-Chat-GGUF"
-# MODEL_BASENAME = "llama-2-7b-chat.Q4_K_M.gguf"
+MODEL_ID = "TheBloke/Llama-2-7b-Chat-GGUF"
+MODEL_BASENAME = "llama-2-7b-chat.Q4_K_M.gguf"
 
 # MODEL_ID = "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF"
 # MODEL_BASENAME = "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
@@ -114,8 +114,8 @@ EMBEDDING_MODEL_NAME = "hkunlp/instructor-large"  # Uses 1.5 GB of VRAM (High Ac
 #MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 #MODEL_ID = "TheBloke/Llama-2-7b-Chat-GGUF"
 #MODEL_BASENAME = "llama-2-7b-chat.Q4_K_M.gguf"
-MODEL_ID = "TheBloke/CapybaraHermes-2.5-Mistral-7B-GGUF"
-MODEL_BASENAME = "capybarahermes-2.5-mistral-7b.Q6_K.gguf"
+#MODEL_ID = "TheBloke/CapybaraHermes-2.5-Mistral-7B-GGUF"
+#MODEL_BASENAME = "capybarahermes-2.5-mistral-7b.Q6_K.gguf"
 # LLAMA 3 # use for NVIDIA GPUs
 # MODEL_ID = "unsloth/llama-3-8b-bnb-4bit"
 # MODEL_BASENAME = None

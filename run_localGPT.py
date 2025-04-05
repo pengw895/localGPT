@@ -8,6 +8,8 @@ from langchain.embeddings import HuggingFaceInstructEmbeddings
 from langchain.llms import HuggingFacePipeline
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler  # for streaming response
 from langchain.callbacks.manager import CallbackManager
+from docx import Document
+import re
 
 callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
 
@@ -183,6 +185,181 @@ def retrieval_qa_pipline(device_type, use_history, promptTemplate_type="llama"):
     return qa
 
 
+def find_placeholders(doc):
+    """
+    Find all placeholders in a Word document.
+    Placeholders are assumed to be text enclosed in {{ }} or [[ ]]
+    Returns a list of unique placeholders.
+    """
+    placeholders = set()
+    for paragraph in doc.paragraphs:
+        # Find placeholders in {{ }} format
+        matches = re.findall(r'{{(.*?)}}', paragraph.text)
+        placeholders.update(matches)
+        # Find placeholders in [[ ]] format
+        matches = re.findall(r'\[\[(.*?)\]\]', paragraph.text)
+        placeholders.update(matches)
+    
+    # Also check tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    matches = re.findall(r'{{(.*?)}}', paragraph.text)
+                    placeholders.update(matches)
+                    matches = re.findall(r'\[\[(.*?)\]\]', paragraph.text)
+                    placeholders.update(matches)
+    
+    return list(placeholders)
+
+def fill_placeholder(doc, placeholder, value):
+    """
+    Replace a placeholder in the document with its value.
+    """
+    # Replace in paragraphs
+    for paragraph in doc.paragraphs:
+        if f"{{{{{placeholder}}}}}" in paragraph.text:
+            paragraph.text = paragraph.text.replace(f"{{{{{placeholder}}}}}", value)
+        if f"[[{placeholder}]]" in paragraph.text:
+            paragraph.text = paragraph.text.replace(f"[[{placeholder}]]", value)
+    
+    # Replace in tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    if f"{{{{{placeholder}}}}}" in paragraph.text:
+                        paragraph.text = paragraph.text.replace(f"{{{{{placeholder}}}}}", value)
+                    if f"[[{placeholder}]]" in paragraph.text:
+                        paragraph.text = paragraph.text.replace(f"[[{placeholder}]]", value)
+
+def is_generic_content(text, qa):
+    """
+    Use the LLM to determine if a piece of text is generic/placeholder content.
+    Returns True if the text appears to be a placeholder that needs filling.
+    """
+    if not text.strip():
+        return False
+        
+    # Query the LLM to analyze the text
+    query = f"""Analyze this text and determine if it's a generic placeholder that needs to be filled in with specific information.
+    Consider it generic if it:
+    1. Contains words like 'your', 'the', 'a', 'an' followed by a noun without specific details
+    2. Uses placeholder-like language (e.g., 'enter your', 'fill in', 'specify')
+    3. Is too vague or general to be meaningful content
+    4. Looks like it's waiting for specific information to be inserted
+    
+    Text to analyze: "{text}"
+    
+    Respond with only 'GENERIC' if it's a placeholder, or 'SPECIFIC' if it contains meaningful content.
+    """
+    
+    res = qa(query)
+    answer = res["result"].strip().upper()
+    return "GENERIC" in answer
+
+def find_generic_content(doc, qa):
+    """
+    Find all generic/placeholder content in a Word document using LLM analysis.
+    Prints each piece of generic content as it's found.
+    Returns a list of tuples (text, location) where location describes where in the document the text was found.
+    """
+    generic_content = []
+    
+    print("\nAnalyzing document for generic content...")
+    
+    # Check paragraphs
+    for i, paragraph in enumerate(doc.paragraphs):
+        if paragraph.text.strip():
+            if is_generic_content(paragraph.text, qa):
+                location = f"Paragraph {i+1}"
+                print(f"\nFound generic content in {location}:")
+                print(f"Content: {paragraph.text}")
+                generic_content.append((paragraph.text, location))
+    
+    # Check tables
+    for table_idx, table in enumerate(doc.tables):
+        for row_idx, row in enumerate(table.rows):
+            for cell_idx, cell in enumerate(row.cells):
+                for para_idx, paragraph in enumerate(cell.paragraphs):
+                    if paragraph.text.strip():
+                        if is_generic_content(paragraph.text, qa):
+                            location = f"Table {table_idx+1}, Row {row_idx+1}, Cell {cell_idx+1}, Paragraph {para_idx+1}"
+                            print(f"\nFound generic content in {location}:")
+                            print(f"Content: {paragraph.text}")
+                            generic_content.append((paragraph.text, location))
+    
+    return generic_content
+
+def fill_generic_content(doc, generic_content, qa):
+    """
+    For each piece of generic content, query the RAG system for relevant information and fill it in.
+    Returns list of unfilled generic content.
+    """
+    unfilled_content = []
+    
+    for text, location in generic_content:
+        # Query the RAG system for specific information to replace the generic content
+        query = f"""Find specific information in the CI6782-140-001 - Cypress Privacy & Security Requirements Verification By Analysis document to replace this generic content: "{text}"
+        The content is located in {location}. Only return the specific information from the document, no other text."""
+        
+        res = qa(query)
+        answer = res["result"]
+        
+        if answer and "I don't know" not in answer and "cannot find" not in answer.lower():
+            print(f"\nFilling content in {location}:")
+            print(f"Original: {text}")
+            print(f"Replacement: {answer}")
+            
+            # Replace the content in the document
+            if "Table" in location:
+                # Parse location to get table, row, cell, and paragraph indices
+                parts = location.split(", ")
+                table_idx = int(parts[0].split()[1]) - 1
+                row_idx = int(parts[1].split()[1]) - 1
+                cell_idx = int(parts[2].split()[1]) - 1
+                para_idx = int(parts[3].split()[1]) - 1
+                
+                doc.tables[table_idx].rows[row_idx].cells[cell_idx].paragraphs[para_idx].text = answer
+            else:
+                # Parse paragraph index
+                para_idx = int(location.split()[1]) - 1
+                doc.paragraphs[para_idx].text = answer
+        else:
+            print(f"\nCould not find specific information for content in {location}:")
+            print(f"Generic content: {text}")
+            unfilled_content.append((text, location))
+    
+    return unfilled_content
+
+def process_template(template_path, qa):
+    """
+    Process a Word template document:
+    1. Find all generic/placeholder content using LLM
+    2. For each generic content, query the RAG system for specific information
+    3. Fill in the template with found values
+    4. Return list of unfilled generic content
+    """
+    doc = Document(template_path)
+    
+    print("\nAnalyzing document for generic content...")
+    generic_content = find_generic_content(doc, qa)
+    
+    print("\nFound generic content:")
+    for text, location in generic_content:
+        print(f"\nLocation: {location}")
+        print(f"Content: {text}")
+    
+    print("\nAttempting to fill generic content with specific information...")
+    unfilled_content = fill_generic_content(doc, generic_content, qa)
+    
+    # Save the filled template
+    output_path = "filled-in-template.docx"
+    doc.save(output_path)
+    print(f"\nSaved filled template to {output_path}")
+    
+    return unfilled_content
+
 # chose device typ to run on as well as to show source documents.
 @click.command()
 @click.option(
@@ -238,27 +415,15 @@ def retrieval_qa_pipline(device_type, use_history, promptTemplate_type="llama"):
     is_flag=True,
     help="whether to save Q&A pairs to a CSV file (Default is False)",
 )
-def main(device_type, show_sources, use_history, model_type, save_qa):
+@click.option(
+    "--template_path",
+    default="template.docx",
+    help="Path to the Word template file (Default is template.docx)",
+)
+def main(device_type, show_sources, use_history, model_type, save_qa, template_path):
     """
-    Implements the main information retrieval task for a localGPT.
-
-    This function sets up the QA system by loading the necessary embeddings, vectorstore, and LLM model.
-    It then enters an interactive loop where the user can input queries and receive answers. Optionally,
-    the source documents used to derive the answers can also be displayed.
-
-    Parameters:
-    - device_type (str): Specifies the type of device where the model will run, e.g., 'cpu', 'mps', 'cuda', etc.
-    - show_sources (bool): Flag to determine whether to display the source documents used for answering.
-    - use_history (bool): Flag to determine whether to use chat history or not.
-
-    Notes:
-    - Logging information includes the device type, whether source documents are displayed, and the use of history.
-    - If the models directory does not exist, it creates a new one to store models.
-    - The user can exit the interactive loop by entering "exit".
-    - The source documents are displayed if the show_sources flag is set to True.
-
+    Process a Word template document using RAG to fill in placeholders.
     """
-
     logging.info(f"Running on: {device_type}")
     logging.info(f"Display Source Documents set to: {show_sources}")
     logging.info(f"Use history set to: {use_history}")
@@ -267,33 +432,22 @@ def main(device_type, show_sources, use_history, model_type, save_qa):
     if not os.path.exists(MODELS_PATH):
         os.mkdir(MODELS_PATH)
 
+    # Initialize the QA system
     qa = retrieval_qa_pipline(device_type, use_history, promptTemplate_type=model_type)
-    # Interactive questions and answers
-    while True:
-        query = input("\nEnter a query: ")
-        if query == "exit":
-            break
-        # Get the answer from the chain
-        res = qa(query)
-        answer, docs = res["result"], res["source_documents"]
-
-        # Print the result
-        print("\n\n> Question:")
-        print(query)
-        print("\n> Answer:")
-        print(answer)
-
-        if show_sources:  # this is a flag that you can set to disable showing answers.
-            # # Print the relevant sources used for the answer
-            print("----------------------------------SOURCE DOCUMENTS---------------------------")
-            for document in docs:
-                print("\n> " + document.metadata["source"] + ":")
-                print(document.page_content)
-            print("----------------------------------SOURCE DOCUMENTS---------------------------")
-
-        # Log the Q&A to CSV only if save_qa is True
-        if save_qa:
-            utils.log_to_csv(query, answer)
+    
+    # Process the template
+    if not os.path.exists(template_path):
+        print(f"Error: Template file {template_path} not found!")
+        return
+        
+    unfilled_content = process_template(template_path, qa)
+    
+    if unfilled_content:
+        print("\nThe following placeholders could not be filled:")
+        for text, location in unfilled_content:
+            print(f"- {text} (Location: {location})")
+    else:
+        print("\nAll placeholders were successfully filled!")
 
 
 if __name__ == "__main__":
