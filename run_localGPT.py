@@ -185,54 +185,6 @@ def retrieval_qa_pipline(device_type, use_history, promptTemplate_type="llama"):
     return qa
 
 
-def find_placeholders(doc):
-    """
-    Find all placeholders in a Word document.
-    Placeholders are assumed to be text enclosed in {{ }} or [[ ]]
-    Returns a list of unique placeholders.
-    """
-    placeholders = set()
-    for paragraph in doc.paragraphs:
-        # Find placeholders in {{ }} format
-        matches = re.findall(r'{{(.*?)}}', paragraph.text)
-        placeholders.update(matches)
-        # Find placeholders in [[ ]] format
-        matches = re.findall(r'\[\[(.*?)\]\]', paragraph.text)
-        placeholders.update(matches)
-    
-    # Also check tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    matches = re.findall(r'{{(.*?)}}', paragraph.text)
-                    placeholders.update(matches)
-                    matches = re.findall(r'\[\[(.*?)\]\]', paragraph.text)
-                    placeholders.update(matches)
-    
-    return list(placeholders)
-
-def fill_placeholder(doc, placeholder, value):
-    """
-    Replace a placeholder in the document with its value.
-    """
-    # Replace in paragraphs
-    for paragraph in doc.paragraphs:
-        if f"{{{{{placeholder}}}}}" in paragraph.text:
-            paragraph.text = paragraph.text.replace(f"{{{{{placeholder}}}}}", value)
-        if f"[[{placeholder}]]" in paragraph.text:
-            paragraph.text = paragraph.text.replace(f"[[{placeholder}]]", value)
-    
-    # Replace in tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    if f"{{{{{placeholder}}}}}" in paragraph.text:
-                        paragraph.text = paragraph.text.replace(f"{{{{{placeholder}}}}}", value)
-                    if f"[[{placeholder}]]" in paragraph.text:
-                        paragraph.text = paragraph.text.replace(f"[[{placeholder}]]", value)
-
 def is_generic_content(text, qa):
     """
     Use the LLM to determine if a piece of text is generic/placeholder content.
