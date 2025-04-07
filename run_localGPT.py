@@ -245,23 +245,103 @@ def find_generic_content(doc, qa):
 
 def fill_generic_content(doc, generic_content, qa):
     """
-    For each piece of generic content, query the RAG system for relevant information and fill it in.
+    For each piece of generic content, analyze the template structure and reformat the CI6782 document accordingly.
+    First handles standard replacements, then uses module requirement verification content for the MR table.
     Returns list of unfilled generic content.
     """
     unfilled_content = []
     
+    # First, get an overview of the template structure
+    template_structure = []
+    for i, paragraph in enumerate(doc.paragraphs):
+        if paragraph.text.strip():
+            template_structure.append(f"Paragraph {i+1}: {paragraph.text}")
+    
+    for table_idx, table in enumerate(doc.tables):
+        for row_idx, row in enumerate(table.rows):
+            for cell_idx, cell in enumerate(row.cells):
+                for para_idx, paragraph in enumerate(cell.paragraphs):
+                    if paragraph.text.strip():
+                        template_structure.append(
+                            f"Table {table_idx+1}, Row {row_idx+1}, Cell {cell_idx+1}, Paragraph {para_idx+1}: {paragraph.text}"
+                        )
+    
+    # Create a comprehensive prompt for reformatting
+    template_overview = "\n".join(template_structure)
+    
+    # First, get the module requirement verification content with a more specific query
+    mr_query = """Search the CI6782-140-001 document for the Module Requirements section.
+    Look for content that describes:
+    1. Each requirement's ID (e.g., CI6782-XXX, etc.)
+    2. The specific requirement text
+    3. How the requirement was verified
+    4. The verification results
+    
+    Format each requirement as:
+    Requirement ID: [ID]
+    Description: [requirement text]
+    Verification Method: [method used]
+    Result: [verification result]
+    
+    Only return actual content from the document, no made-up or placeholder content."""
+    
+    print("\nFetching module requirements content...")
+    mr_res = qa(mr_query)
+    mr_content = mr_res["result"]
+    
+    # Verify we got meaningful content
+    if not mr_content or "MS MS" in mr_content or len(mr_content.strip()) < 50:
+        print("Warning: Could not retrieve meaningful module requirements content.")
+        mr_content = "Module requirements content could not be retrieved from the document."
+    
+    reformat_prompt = f"""You are tasked with reformatting the CI6782-140-001 document according to this template structure.
+
+Template Structure:
+{template_overview}
+
+Available Module Requirements Content:
+{mr_content}
+
+Instructions:
+1. First, replace these standard fields:
+   - Replace 'Document Title' with 'Cypress Privacy & Security Requirements Verification by Analysis'
+   - Replace 'Document Number' with 'CI6782-140-001'
+   - Replace 'Project Name' with 'Cypress'
+   - Replace 'Project Number' with 'CI6782'
+   - Replace 'Document Date' with '2024-04-06'
+
+2. Then rewrite the CI6782-140-001 document to match the template structure:
+   - Use the provided module requirements content to fill in the MR table
+   - Maintain the template's formatting and structure
+   - Ensure all sections are properly connected
+   - Keep the document's professional tone and style
+
+Important:
+- Only use actual content from the CI6782-140-001 document
+- Do not make up or generate placeholder content
+- If you cannot find specific content, indicate this clearly
+- Maintain the exact formatting of the template
+
+Return the reformatted content for this specific location."""
+
     for text, location in generic_content:
-        # Query the RAG system for specific information to replace the generic content
-        query = f"""Find specific information in the CI6782-140-001 - Cypress Privacy & Security Requirements Verification By Analysis document to replace this generic content: "{text}"
-        The content is located in {location}. Only return the specific information from the document, no other text."""
+        # Query the RAG system for reformatted content
+        query = f"{reformat_prompt}\n\nLocation to fill: {location}\nCurrent generic content: {text}"
         
+        print(f"\nProcessing location: {location}")
         res = qa(query)
         answer = res["result"]
         
-        if answer and "I don't know" not in answer and "cannot find" not in answer.lower():
-            print(f"\nFilling content in {location}:")
-            print(f"Original: {text}")
-            print(f"Replacement: {answer}")
+        # Verify we got meaningful content
+        if not answer or "MS MS" in answer or len(answer.strip()) < 10:
+            print(f"Warning: Could not get meaningful content for {location}")
+            unfilled_content.append((text, location))
+            continue
+        
+        if "I don't know" not in answer and "cannot find" not in answer.lower():
+            print(f"\nReformatting content for {location}:")
+            print(f"Original template text: {text}")
+            print(f"Reformatted content: {answer}")
             
             # Replace the content in the document
             if "Table" in location:
@@ -278,7 +358,7 @@ def fill_generic_content(doc, generic_content, qa):
                 para_idx = int(location.split()[1]) - 1
                 doc.paragraphs[para_idx].text = answer
         else:
-            print(f"\nCould not find specific information for content in {location}:")
+            print(f"\nCould not find appropriate content for {location}:")
             print(f"Generic content: {text}")
             unfilled_content.append((text, location))
     
