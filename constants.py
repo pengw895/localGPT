@@ -101,8 +101,10 @@ EMBEDDING_MODEL_NAME = "hkunlp/instructor-large"  # Uses 1.5 GB of VRAM (High Ac
 # MODEL_ID = "TheBloke/Llama-2-13b-Chat-GGUF"
 # MODEL_BASENAME = "llama-2-13b-chat.Q4_K_M.gguf"
 
-MODEL_ID = "TheBloke/Llama-2-7b-Chat-GGUF"
-MODEL_BASENAME = "llama-2-7b-chat.Q4_K_M.gguf"
+#MODEL_ID = "TheBloke/Llama-2-7b-Chat-GGUF"
+#MODEL_BASENAME = "llama-2-7b-chat.Q4_K_M.gguf"
+MODEL_ID = "openbmb/MiniCPM3-4B-GGUF"
+MODEL_BASENAME = "minicpm3-4b-q4_k_m.gguf"
 
 # MODEL_ID = "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF"
 # MODEL_BASENAME = "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
